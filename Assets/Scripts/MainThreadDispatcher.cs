@@ -12,7 +12,11 @@ public class MainThreadDispatcher : MonoBehaviour
         if (_instance == null)
         {
             // Find an existing instance in the scene
+#if UNITY_2023_1_OR_NEWER
+            _instance = FindFirstObjectByType<MainThreadDispatcher>();
+#else
             _instance = FindObjectOfType<MainThreadDispatcher>();
+#endif
 
             // If no instance exists, create a new GameObject and add the dispatcher to it
             if (_instance == null)
