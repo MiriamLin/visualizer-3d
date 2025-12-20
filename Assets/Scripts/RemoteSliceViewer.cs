@@ -10,8 +10,10 @@ using TMPro;
 
 public class RemoteSliceViewer : MonoBehaviour
 {
-    [Header("Server (http://<IP>:8080)")]
-    public string serverBase = "http://192.168.0.2:8080";
+    [Header("Server Endpoints (tries in order)")]
+    // iPhone 熱點常見：gateway 多為 172.20.10.1，但實際分配給主機的 IP 可能不同（如 172.20.10.5）。
+    // 可在 Inspector 加入多個候選，如 gateway + 本機熱點 IP。
+    public string[] serverBases = new[] { "http://172.20.10.5:8080", "http://172.20.10.1:8080" };
     public string filename = "your.tif";
 
     [Header("Targets")]
@@ -21,6 +23,11 @@ public class RemoteSliceViewer : MonoBehaviour
     [Header("UI Labels")] 
     public TMP_Text xzLabel;
     public TMP_Text yzLabel;
+
+    [Header("Scaling")]
+    public float scaleStep = 0.05f;
+    public float minScale = 0.1f;
+    public float maxScale = 2f;
 
     [Header("Slice Indices")]
     public int xIndex = 0; // XZ uses X index
@@ -38,6 +45,7 @@ public class RemoteSliceViewer : MonoBehaviour
     {
         StartCoroutine(LoadXZ());
         StartCoroutine(LoadYZ());
+        UpdateLabels();
     }
 
     private void Update()
@@ -61,17 +69,19 @@ public class RemoteSliceViewer : MonoBehaviour
                 StartCoroutine(LoadYZ());
                 nextAllowedInput = Time.time + repeatDelay;
             }
+            else if (Mathf.Abs(leftStick.y) > deadzone && xzRenderer != null)
+            {
+                AdjustQuadScale(xzRenderer.transform, leftStick.y, "XZ");
+                nextAllowedInput = Time.time + repeatDelay;
+            }
+            else if (Mathf.Abs(rightStick.y) > deadzone && yzRenderer != null)
+            {
+                AdjustQuadScale(yzRenderer.transform, rightStick.y, "YZ");
+                nextAllowedInput = Time.time + repeatDelay;
+            }
         }
 
-        if (xzLabel != null)
-        {
-            xzLabel.text = $"xz x={xIndex}"; 
-        }
-
-        if (yzLabel != null)
-        {
-            yzLabel.text = $"yz y={yIndex}";
-        }
+        UpdateLabels();
     }
 
     // Reads left controller stick if Oculus Integration is present; otherwise falls back to Input System or XR.
@@ -125,40 +135,89 @@ public class RemoteSliceViewer : MonoBehaviour
         return Vector2.zero;
     }
 
+    private void AdjustQuadScale(Transform target, float inputY, string plane)
+    {
+        float current = target.localScale.x;
+        float delta = Mathf.Sign(inputY) * scaleStep;
+        float next = Mathf.Clamp(current + delta, minScale, maxScale);
+        target.localScale = new Vector3(next, next, next);
+        Debug.Log($"[{plane}] Scale -> {next:0.00}");
+    }
+
+    private void UpdateLabels()
+    {
+        if (xzLabel != null)
+        {
+            float xzScale = xzRenderer != null ? xzRenderer.transform.localScale.x : 0f;
+            xzLabel.text = $"xz x={xIndex}";
+        }
+
+        if (yzLabel != null)
+        {
+            float yzScale = yzRenderer != null ? yzRenderer.transform.localScale.x : 0f;
+            yzLabel.text = $"yz y={yIndex}";
+        }
+    }
+
     private IEnumerator LoadXZ()
     {
-        string url = $"{serverBase}/read_slice/{filename}?plane=xz&index={xIndex}";
-        yield return FetchAndApply(url, xzRenderer, "XZ");
+        var urls = BuildUrls("xz", xIndex);
+        yield return FetchAndApply(urls, xzRenderer, "XZ");
     }
 
     private IEnumerator LoadYZ()
     {
-        string url = $"{serverBase}/read_slice/{filename}?plane=yz&index={yIndex}";
-        yield return FetchAndApply(url, yzRenderer, "YZ");
+        var urls = BuildUrls("yz", yIndex);
+        yield return FetchAndApply(urls, yzRenderer, "YZ");
     }
 
-    private IEnumerator FetchAndApply(string url, Renderer target, string label)
+    private System.Collections.Generic.List<string> BuildUrls(string plane, int index)
+    {
+        var list = new System.Collections.Generic.List<string>();
+        if (serverBases != null)
+        {
+            foreach (string baseUrl in serverBases)
+            {
+                if (string.IsNullOrWhiteSpace(baseUrl))
+                    continue;
+                list.Add($"{baseUrl}/read_slice/{filename}?plane={plane}&index={index}");
+            }
+        }
+        return list;
+    }
+
+    private IEnumerator FetchAndApply(System.Collections.Generic.List<string> urls, Renderer target, string label)
     {
         if (target == null)
             yield break;
 
-        using (UnityWebRequest req = UnityWebRequestTexture.GetTexture(url))
+        if (urls == null || urls.Count == 0)
         {
-            // Uncomment if you serve HTTPS with self-signed certs.
-            // req.certificateHandler = new AcceptAllCertificatesHandler();
-
-            yield return req.SendWebRequest();
-
-            if (req.result != UnityWebRequest.Result.Success)
-            {
-                Debug.LogError($"[{label}] Slice fetch failed: {req.error} | {url}");
-                yield break;
-            }
-
-            Texture2D tex = DownloadHandlerTexture.GetContent(req);
-            // Debug.Log($"[{label}] Loaded {tex.width}x{tex.height} from {url}");
-            target.material.mainTexture = tex;
-            target.material.color = Color.white;
+            Debug.LogError($"[{label}] No server endpoints configured.");
+            yield break;
         }
+
+        foreach (string url in urls)
+        {
+            using (UnityWebRequest req = UnityWebRequestTexture.GetTexture(url))
+            {
+                // Uncomment if you serve HTTPS with self-signed certs.
+                // req.certificateHandler = new AcceptAllCertificatesHandler();
+
+                yield return req.SendWebRequest();
+
+                if (req.result == UnityWebRequest.Result.Success)
+                {
+                    Texture2D tex = DownloadHandlerTexture.GetContent(req);
+                    target.material.mainTexture = tex;
+                    target.material.color = Color.white;
+                    yield break;
+                }
+
+                Debug.LogWarning($"[{label}] Slice fetch failed: {req.error} | {url}");
+            }
+        }
+
+        Debug.LogError($"[{label}] All slice fetch attempts failed ({urls.Count} endpoint(s)).");
     }
 }
